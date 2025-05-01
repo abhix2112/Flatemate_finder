@@ -1,0 +1,32 @@
+# Rust-related
+/target/
+**/*.rs.bk
+
+# Cargo files
+Cargo.lock
+
+# IDE/editor config
+.idea/
+.vscode/
+
+# dotenv files
+.env
+.env.*
+
+# SQLx-specific (if using offline mode)
+sqlx-data.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+log/
+
+# Backups
+*.bak
+*.tmp
+
+# If you use docker locally
+docker-compose.override.yml
