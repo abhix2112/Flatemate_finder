@@ -1,7 +1,0 @@
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
-CREATE TABLE users (
-    id UUID PRIMARY KEY,
-    phone VARCHAR NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT NOW()
-);

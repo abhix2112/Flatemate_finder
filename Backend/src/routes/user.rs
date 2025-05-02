@@ -1,22 +1,22 @@
 use axum::{Json, extract::State};
 use uuid::Uuid;
 use crate::utils::state::AppState;
-use crate::models::PhoneInput;
+use crate::models::user::User;
 use serde_json::json;
+
 
 pub async fn signup(
     State(state): State<AppState>,
-    Json(input): Json<PhoneInput>,
+    Json(input): Json<User>,
 ) -> Json<serde_json::Value> {
     let id = Uuid::new_v4();
     let res = sqlx::query!(
-        "INSERT INTO users (id, full_name, phone, email, password_hash, is_verified) VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO users (id, phone, hashed_password, created_at) VALUES ($1, $2, $3, $4)",
         id,
-        input.full_name,
         input.phone,
-        input.email,
-        input.password,
-        false
+        input.hashed_password,
+        chrono::Utc::now()
+     
     )
     .execute(&state.db)
     .await;

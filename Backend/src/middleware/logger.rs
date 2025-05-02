@@ -1,14 +1,12 @@
-use axum::{
-    body::Body,
-    http::{Request, Response},
-};
 use std::task::{Context, Poll};
 use tower::{Layer, Service};
+use hyper::{Request, Response};
+use axum::body::Body;
 use std::pin::Pin;
 use std::future::Future;
-use std::time::Instant;
+use tracing::info;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct LoggerLayer;
 
 impl<S> Layer<S> for LoggerLayer {
@@ -29,8 +27,10 @@ where
     S: Service<Request<ReqBody>, Response = Response<Body>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     ReqBody: Send + 'static,
+
+    S::Error: std::fmt::Debug,
 {
-    type Response = S::Response;
+    type Response = Response<Body>;
     type Error = S::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -40,15 +40,13 @@ where
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let method = req.method().clone();
-        let path = req.uri().path().to_string();
-        let start = Instant::now();
-
+        let uri = req.uri().clone();
         let fut = self.inner.call(req);
 
         Box::pin(async move {
-            let res = fut.await;
-            println!("[{}] {} - {:?}", method, path, start.elapsed());
-            res
+            let response = fut.await?;
+            info!("{} {} => {}", method, uri, response.status());
+            Ok(response)
         })
     }
 }
