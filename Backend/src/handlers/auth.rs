@@ -1,70 +1,123 @@
-use axum::{
-    extract::{State, TypedHeader},
-    headers::Authorization,
-    http::StatusCode,
-    Json,
-};
-use crate::{
-    models::user::{CompleteProfileInput},
-    utils::{state::AppState, token::extract_user_id_from_token},
-};
-use sqlx::types::Uuid;
-use serde_json::json;
-use chrono::Utc;
+use axum::{Json, extract::State};
+use crate::utils::state::AppState;
+use crate::middleware::auth::AuthenticatedUser;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use chrono::NaiveDate;
 
+#[derive(Deserialize)]
+pub struct CompleteProfileInput {
+    pub full_name: String,
+    pub dob: NaiveDate,
+    pub email: String,
+    pub gender: Option<String>,
+    pub city: Option<String>,
+    pub preferences: Option<Value>, // expecting JSON from frontend
+}
+
+#[axum::debug_handler]
 pub async fn complete_profile(
     State(state): State<AppState>,
-    TypedHeader(auth_header): TypedHeader<Authorization<String>>,
+    AuthenticatedUser { user_id, roles }: AuthenticatedUser,
     Json(input): Json<CompleteProfileInput>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Step 1: Extract user ID from secure token
-    let token = auth_header.0;
-    let user_id = extract_user_id_from_token(&token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+) -> Json<serde_json::Value> {
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(_) => {
+            return Json(json!({ "status": "error", "message": "Failed to start DB transaction" }));
+        }
+    };
 
-    // Step 2: Insert user profile
-    let _ = sqlx::query!(
-        r#"
-        INSERT INTO user_profiles (user_id, name, email, dob, gender, preferences, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        "#,
-        user_id,
-        input.name,
-        input.email,
-        input.dob,
-        input.gender,
-        input.preferences,
-        Utc::now()
+    // ✅ Check if the user has the fm_external role
+    let current_role = sqlx::query_scalar!(
+        "SELECT r.name AS role_name
+FROM user_has_roles u
+JOIN roles r ON u.role_id = r.id
+WHERE u.user_id = $1;",
+        user_id
     )
-    .execute(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .fetch_optional(&mut *tx)
+    .await;
 
-    // Step 3: Mark profile complete
-    sqlx::query!("UPDATE users SET is_profile_complete = true WHERE id = $1", user_id)
-        .execute(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Step 4: Assign default role (e.g., "user")
-    let role = sqlx::query!("SELECT id FROM roles WHERE name = 'user'")
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(role) = role {
-        sqlx::query!(
-            "INSERT INTO user_roles (user_id, role_id, assigned_at) VALUES ($1, $2, $3)",
-            user_id,
-            role.id,
-            Utc::now()
-        )
-        .execute(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match current_role {
+        Ok(Some(role)) if role != "fm_external" => {
+            return Json(json!({
+                "status": "error",
+                "message": "Only users with 'fm_external' role can complete profile"
+            }));
+        }
+        Ok(None) => {
+            return Json(json!({
+                "status": "error",
+                "message": "User or role not found"
+            }));
+        }
+        Err(e) => {
+            println!("Role check error: {:?}", e);
+            return Json(json!({ "status": "error", "message": "Failed to check user role" }));
+        }
+        _ => {}
     }
 
-    Ok(Json(json!({
-        "status": "profile_completed",
-        "user_id": user_id
-    })))
+    // ✅ Insert into user_profiles
+    if let Err(e) = sqlx::query!(
+        "INSERT INTO user_profiles (user_id, full_name, dob, email, gender, city, preferences)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        user_id,
+        input.full_name,
+        input.dob,
+        input.email,
+        input.gender,
+        input.city,
+        input.preferences
+    )
+    .execute(&mut *tx)
+    .await {
+        println!("Profile insert error: {:?}", e);
+        return Json(json!({ "status": "error", "message": "Failed to complete profile" }));
+    }
+
+    // ✅ Update is_profile_complete = true
+    if let Err(e) = sqlx::query!(
+        "UPDATE users SET is_profile_complete = true WHERE id = $1",
+        user_id
+    )
+    .execute(&mut *tx)
+    .await {
+        println!("User update error: {:?}", e);
+        return Json(json!({ "status": "error", "message": "Profile saved but user update failed" }));
+    }
+
+    // ✅ Promote role to fm_internal
+    let internal_role_id = sqlx::query_scalar!(
+        "SELECT id FROM roles WHERE name = 'fm_internal'"
+    )
+    .fetch_one(&mut *tx)
+    .await;
+
+    match internal_role_id {
+        Ok(role_id) => {
+            if let Err(e) = sqlx::query!(
+                "UPDATE user_has_roles SET role_id = $1 WHERE user_id = $2",
+                role_id,
+                user_id
+            )
+            .execute(&mut *tx)
+            .await {
+                println!("Role update error: {:?}", e);
+                return Json(json!({ "status": "error", "message": "Profile updated but failed to upgrade role" }));
+            }
+        }
+        Err(e) => {
+            println!("Fetching fm_internal role_id failed: {:?}", e);
+            return Json(json!({ "status": "error", "message": "Failed to fetch new role" }));
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        println!("Transaction commit error: {:?}", e);
+        return Json(json!({ "status": "error", "message": "Profile update failed at commit" }));
+    }
+
+    Json(json!({ "status": "success", "message": "Profile completed and role upgraded" }))
 }

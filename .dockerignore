@@ -1,0 +1,12 @@
+# Prevent unnecessary files from being copied to the Docker image
+
+/target
+/.git
+/.vscode
+/tests
+Dockerfile
+.dockerignore
+*.toml
+*.lock
+*.md
+.env

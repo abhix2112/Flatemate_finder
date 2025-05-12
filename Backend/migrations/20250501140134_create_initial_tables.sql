@@ -27,6 +27,7 @@ CREATE TABLE listings (
     location TEXT NOT NULL,
     price INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+     created_by UUID REFERENCES users(id)
 );
 
 CREATE TABLE requests (
@@ -35,6 +36,7 @@ CREATE TABLE requests (
     sender_id UUID REFERENCES users(id) ON DELETE CASCADE,
     status TEXT CHECK (status IN ('pending', 'approved', 'rejected')) DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_by UUID REFERENCES users(id)
 );
 
 CREATE TABLE messages (
@@ -69,15 +71,40 @@ CREATE TABLE user_profiles (
 CREATE TABLE roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT UNIQUE NOT NULL,
-    description TEXT
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
+
 -- user_roles table
-CREATE TABLE user_roles (
+CREATE TABLE user_has_roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
     role_id UUID REFERENCES roles(id) ON DELETE CASCADE,
-    assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    assigned_by UUID REFERENCES users(id), -- for admin/audit
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(user_id, role_id)
+);
+
+
+CREATE TABLE chat_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sender_id UUID REFERENCES users(id),
+    receiver_id UUID REFERENCES users(id),
+    message TEXT NOT NULL,
+    chat_dropped BOOLEAN DEFAULT false,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE chat_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    sender_id UUID NOT NULL,
+    receiver_id UUID NOT NULL,
+    listing_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    chat_dropped BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT now(),
+    last_message_at TIMESTAMP
 );
 
 

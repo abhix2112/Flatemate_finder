@@ -1,10 +1,11 @@
 use axum::{Json, extract::State};
 use serde_json::json;
-use chrono::{Duration, Utc};
+use chrono::{Utc};
 use crate::utils::state::AppState;
 use crate::utils::twilio::{send_otp_via_twilio_verify, verify_otp_via_twilio};
 use crate::models::otp::{OTPInput, Sendotp};
-use crate::utils::token::{create_token_pair};
+use crate::utils::token::create_token_pair;
+use uuid::Uuid;
 
 pub async fn send_otp(
     State(state): State<AppState>,
@@ -55,15 +56,16 @@ pub async fn verify_otp(
 ) -> Json<serde_json::Value> {
     match verify_otp_via_twilio(&input.phone, &input.otp).await {
         Ok(true) => {
-            // Check if user exists
+            let mut is_new_user = false;
+
+            // 1. Check if user exists
             let user_opt = sqlx::query!("SELECT id FROM users WHERE phone = $1", input.phone)
                 .fetch_optional(&state.db)
                 .await
                 .unwrap();
 
-            // If user exists, use ID; else insert new user and return ID
-            let (user_id, is_new_user) = if let Some(user) = user_opt {
-                (user.id, false)
+            let user_id = if let Some(user) = user_opt {
+                user.id
             } else {
                 let new_user = sqlx::query!(
                     "INSERT INTO users (phone) VALUES ($1) RETURNING id",
@@ -72,23 +74,77 @@ pub async fn verify_otp(
                 .fetch_one(&state.db)
                 .await
                 .unwrap();
-                (new_user.id, true)
+                is_new_user = true;
+                new_user.id
             };
 
-            // Generate secure access + refresh tokens
+            // 2. If new user, assign default role `fm_external`
+            if is_new_user {
+                // Fetch role ID of 'fm_external'
+                if let Some(role) = sqlx::query!("SELECT id FROM roles WHERE name = 'fm_external'")
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap()
+                {
+                    let _ = sqlx::query!(
+                        "INSERT INTO user_has_roles (user_id, role_id) VALUES ($1, $2)",
+                        user_id,
+                        role.id
+                    )
+                    .execute(&state.db)
+                    .await;
+                }
+            }
+
+            // 3. Fetch all user roles
+            let roles = sqlx::query!(
+                r#"
+                SELECT r.name FROM roles r
+                JOIN user_has_roles ur ON ur.role_id = r.id
+                WHERE ur.user_id = $1
+                "#,
+                user_id
+            )
+            .fetch_all(&state.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect::<Vec<String>>();
+
+            // 4. Save OTP success for attempt tracking
+            let _ = sqlx::query!(
+                "INSERT INTO otp_attempts (phone, was_success, attempted_at) VALUES ($1, true, NOW())",
+                input.phone
+            )
+            .execute(&state.db)
+            .await;
+
+            // 5. Create tokens
             let tokens = create_token_pair(user_id, &state.db).await.unwrap();
 
             Json(json!({
                 "status": "login_success",
                 "signup_required": is_new_user,
+                "roles": roles,
                 "tokens": tokens
             }))
         }
 
-        Ok(false) => Json(json!({
-            "status": "error",
-            "message": "Invalid or expired OTP"
-        })),
+        Ok(false) => {
+            // Save failed attempt
+            let _ = sqlx::query!(
+                "INSERT INTO otp_attempts (phone, was_success, attempted_at) VALUES ($1, false, NOW())",
+                input.phone
+            )
+            .execute(&state.db)
+            .await;
+
+            Json(json!({
+                "status": "error",
+                "message": "Invalid or expired OTP"
+            }))
+        }
 
         Err(e) => Json(json!({
             "status": "error",

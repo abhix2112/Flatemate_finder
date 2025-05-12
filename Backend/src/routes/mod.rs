@@ -2,3 +2,8 @@ pub mod otp;
 pub mod user;
 pub mod jwt;
 pub mod auth;
+pub mod updateprofile;
+pub mod listing;
+pub mod requests;
+pub mod media;
+pub mod chat;
